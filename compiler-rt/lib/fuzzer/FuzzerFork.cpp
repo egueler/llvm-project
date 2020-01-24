@@ -97,6 +97,7 @@ struct GlobalEnv {
   Vector<std::string> Files;
   Random *Rand;
   std::chrono::system_clock::time_point ProcessStartTime;
+  long LastSyncTime;
   int Verbosity = 0;
 
   size_t NumTimeouts = 0;
@@ -114,7 +115,7 @@ struct GlobalEnv {
         .count();
   }
 
-  FuzzJob *CreateNewJob(size_t JobId) {
+  FuzzJob *CreateNewJob(size_t JobId, std::string Seeds, int DftTimeInSeconds) {
     Command Cmd(Args);
     Cmd.removeFlag("fork");
     Cmd.removeFlag("runs");
@@ -132,18 +133,7 @@ struct GlobalEnv {
         Cmd.addFlag("focus_function", "auto");
     }
     auto Job = new FuzzJob;
-    std::string Seeds;
-    if (size_t CorpusSubsetSize =
-            std::min(Files.size(), (size_t)sqrt(Files.size() + 2))) {
-      auto Time1 = std::chrono::system_clock::now();
-      for (size_t i = 0; i < CorpusSubsetSize; i++) {
-        auto &SF = Files[Rand->SkewTowardsLast(Files.size())];
-        Seeds += (Seeds.empty() ? "" : ",") + SF;
-        CollectDFT(SF);
-      }
-      auto Time2 = std::chrono::system_clock::now();
-      Job->DftTimeInSeconds = duration_cast<seconds>(Time2 - Time1).count();
-    }
+    Job->DftTimeInSeconds = DftTimeInSeconds;
     if (!Seeds.empty()) {
       Job->SeedListPath =
           DirPlusFile(TempDir, std::to_string(JobId) + ".seeds");
@@ -175,6 +165,66 @@ struct GlobalEnv {
              Job->Cmd.toString().c_str());
     // Start from very short runs and gradually increase them.
     return Job;
+  }
+
+  size_t GetJobSize() {
+    return std::min(Files.size(), (size_t)sqrt(Files.size() + 2));
+  }
+
+  std::string GetRandomSeedFiles(size_t NumFiles) {
+    std::string Seeds;
+      for (size_t i = 0; i < NumFiles; i++) {
+        auto &SF = Files[Rand->SkewTowardsLast(Files.size())];
+        Seeds += (Seeds.empty() ? "" : ",") + SF;
+        CollectDFT(SF);
+      }
+    return Seeds;
+  }
+
+  FuzzJob *CreateNewFuzzJob(size_t JobId) {
+    std::string Seeds;
+    int DftTimeInSeconds = 0;
+    if (size_t CorpusSubsetSize = GetJobSize()) {
+      auto Time1 = std::chrono::system_clock::now();
+      Seeds = GetRandomSeedFiles(CorpusSubsetSize);
+      auto Time2 = std::chrono::system_clock::now();
+      DftTimeInSeconds = duration_cast<seconds>(Time2 - Time1).count();
+    }
+    return CreateNewJob(JobId, Seeds, DftTimeInSeconds);
+  }
+
+  FuzzJob *CreateNewSyncJob(size_t JobId) {
+    // A Sync job uses all other CorpusDirs and rescans them for not before seen files.
+    // After that it does a the same as a Fuzz job, use the specified seed files to fuzz.
+    auto SyncTime = std::time(0);
+    std::string Seeds;
+    size_t NumSyncSeeds = 0;
+    bool first_corpus_dir = true;
+    auto Time1 = std::chrono::system_clock::now();
+    for (auto CorpusDir: CorpusDirs) {
+      if (first_corpus_dir) {  // Don't sync the MainCorpusDir as it only contains seen files.
+        first_corpus_dir = false;
+        continue;
+      }
+      Vector<std::string> Files;
+      ListFilesInDirRecursive(CorpusDir, &LastSyncTime, &Files, /*TopDir*/true);
+      for (auto &File : Files) {
+        if (FileSize(File)) {
+          NumSyncSeeds += 1;
+          Seeds += (Seeds.empty() ? "" : ",") + File;
+          CollectDFT(File);
+        }
+      }
+    }
+    // If there are less sync files than a normal fuzz job we also want to mix in
+    // existing seeds so that this acts similar to a fuzz job.
+    size_t JobSize = GetJobSize();
+    size_t NumNormalSeeds = (JobSize > NumSyncSeeds) ? JobSize - NumSyncSeeds : 0;
+    Seeds += (Seeds.empty() ? "" : ",") + GetRandomSeedFiles(NumNormalSeeds);
+    auto Time2 = std::chrono::system_clock::now();
+    LastSyncTime = SyncTime;
+    int DftTimeInSeconds = duration_cast<seconds>(Time2 - Time1).count();
+    return CreateNewJob(JobId, Seeds, DftTimeInSeconds);
   }
 
   void RunOneMergeJob(FuzzJob *Job) {
@@ -291,6 +341,7 @@ void FuzzWithFork(Random &Rand, const FuzzingOptions &Options,
   Env.Rand = &Rand;
   Env.Verbosity = Options.Verbosity;
   Env.ProcessStartTime = std::chrono::system_clock::now();
+  Env.LastSyncTime = std::numeric_limits<time_t>::min();
   Env.DataFlowBinary = Options.CollectDataFlow;
 
   Vector<SizedFile> SeedFiles;
@@ -332,7 +383,11 @@ void FuzzWithFork(Random &Rand, const FuzzingOptions &Options,
   Vector<std::thread> Threads;
   for (int t = 0; t < NumJobs; t++) {
     Threads.push_back(std::thread(WorkerThread, &FuzzQ, &MergeQ));
-    FuzzQ.Push(Env.CreateNewJob(JobId++));
+    if (JobId % NumJobs == 0) {
+      FuzzQ.Push(Env.CreateNewSyncJob(JobId++));
+    } else {
+      FuzzQ.Push(Env.CreateNewFuzzJob(JobId++));
+    }
   }
 
   while (true) {
@@ -389,8 +444,11 @@ void FuzzWithFork(Random &Rand, const FuzzingOptions &Options,
       StopJobs();
       break;
     }
-
-    FuzzQ.Push(Env.CreateNewJob(JobId++));
+    if (JobId % NumJobs == 0) {
+      FuzzQ.Push(Env.CreateNewSyncJob(JobId++));
+    } else {
+      FuzzQ.Push(Env.CreateNewFuzzJob(JobId++));
+    }
   }
 
   for (auto &T : Threads)
