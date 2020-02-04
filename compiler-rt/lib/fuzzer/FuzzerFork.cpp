@@ -116,7 +116,11 @@ struct GlobalEnv {
   }
 
   FuzzJob *CreateNewJob(size_t JobId, std::string Seeds, int DftTimeInSeconds) {
+    size_t max_total_time = std::min((size_t)60, JobId);  // Jobs can hang, so we don't want to wait too long.
     Command Cmd(Args);
+    std::string timeout_prefix = "timeout -s 10 -k " + std::to_string(max_total_time);
+    Cmd.setPrefix(timeout_prefix); // We want the job to stop after max_total_time no matter what.
+                                    // Signal 10 is SIGUSR1 leading to graceful exit of the job.
     Cmd.removeFlag("fork");
     Cmd.removeFlag("runs");
     Cmd.removeFlag("collect_data_flow");
@@ -125,7 +129,7 @@ struct GlobalEnv {
     Cmd.addFlag("reload", "0");  // working in an isolated dir, no reload.
     Cmd.addFlag("print_final_stats", "1");
     Cmd.addFlag("print_funcs", "0");  // no need to spend time symbolizing.
-    Cmd.addFlag("max_total_time", std::to_string(std::min((size_t)300, JobId)));
+    Cmd.addFlag("max_total_time", std::to_string(max_total_time));
     Cmd.addFlag("stop_file", StopFile());
     if (!DataFlowBinary.empty()) {
       Cmd.addFlag("data_flow_trace", DFTDir);

@@ -37,11 +37,12 @@ public:
       : Args(ArgsToAdd), CombinedOutAndErr(false) {}
 
   explicit Command(const Command &Other)
-      : Args(Other.Args), CombinedOutAndErr(Other.CombinedOutAndErr),
-        OutputFile(Other.OutputFile) {}
+      : Args(Other.Args), Prefix(Other.Prefix),
+        CombinedOutAndErr(Other.CombinedOutAndErr), OutputFile(Other.OutputFile) {}
 
   Command &operator=(const Command &Other) {
     Args = Other.Args;
+    Prefix = Other.Prefix;
     CombinedOutAndErr = Other.CombinedOutAndErr;
     OutputFile = Other.OutputFile;
     return *this;
@@ -59,6 +60,11 @@ public:
   // Gets all of the current command line arguments, **including** those after
   // "-ignore-remaining-args=1".
   const Vector<std::string> &getArguments() const { return Args; }
+
+  // Add a prefix to the command, this allows to easily strace or timeout the cmd.
+  void setPrefix(std::string SetPrefix) {
+    Prefix = SetPrefix;
+  }
 
   // Adds the given argument before "-ignore_remaining_args=1", or at the end
   // if that flag isn't present.
@@ -139,6 +145,8 @@ public:
   // be the equivalent command line.
   std::string toString() const {
     std::stringstream SS;
+    if (!Prefix.empty())
+      SS << Prefix << " ";
     for (auto arg : getArguments())
       SS << arg << " ";
     if (hasOutputFile())
@@ -165,6 +173,9 @@ private:
 
   // The command arguments.  Args[0] is the command name.
   Vector<std::string> Args;
+
+  // The prefix string.
+  std::string Prefix;
 
   // True indicates stderr is redirected to stdout.
   bool CombinedOutAndErr;
