@@ -118,7 +118,7 @@ struct GlobalEnv {
   FuzzJob *CreateNewJob(size_t JobId, std::string Seeds, int DftTimeInSeconds) {
     size_t max_total_time = std::min((size_t)60, JobId);  // Jobs can hang, so we don't want to wait too long.
     Command Cmd(Args);
-    std::string timeout_prefix = "timeout -s 10 -k " + std::to_string(max_total_time);
+    std::string timeout_prefix = "timeout -s 10 -k 1 " + std::to_string(max_total_time);
     Cmd.setPrefix(timeout_prefix); // We want the job to stop after max_total_time no matter what.
                                     // Signal 10 is SIGUSR1 leading to graceful exit of the job.
     Cmd.removeFlag("fork");
